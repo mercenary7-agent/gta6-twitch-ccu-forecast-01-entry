@@ -24,7 +24,9 @@ OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
 
 LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
 # Residual quantiles are shrunk to this spread: 38 launches over-disperse vs one launch.
-SPREAD = 0.55
+SPREAD = 0.45
+# The regression median is blended with the plain empirical median (robustness).
+BLEND = 0.3
 FLOOR = 0.01
 
 
@@ -113,7 +115,7 @@ def forecast_case(case):
         else:
             beta = solve_ridge(X, Y)
             xc = [math.log(p1)]
-            med = beta[0] + beta[1] * xc[0]
+            med = (1.0 - BLEND) * (beta[0] + beta[1] * xc[0]) + BLEND * quantile(sorted(Y), 0.5)
             resid = sorted(yi - (beta[0] + beta[1] * xi[0]) for xi, yi in zip(X, Y))
         qs = [math.exp(med + quantile(resid, tau) * SPREAD) for tau in LEVELS]
         for i in range(1, 5):
