@@ -5,10 +5,13 @@ Reads each case in /input, forecasts hours 2..24 of the release day as five quan
 
 Model: for each comparable launch in the case, the release-day ratio
 r_i(h) = viewers(hour h) / viewers(hour 1). For every hour h we fit, across the
-comparable launches, a linear regression of ln r_i(h) on ln v1_i (the launch's own
-hour-1 print), then predict the case's ln r(h) from its hour-1 print p1. Quantiles
-come from the empirical distribution of the regression residuals, shrunk by SPREAD
-(the residual spread of 38 launches is wider than the conditional spread of one).
+comparable launches, a weighted linear regression of ln r_i(h) on ln v1_i (the
+launch's own hour-1 print), where each comparable is weighted by a Gaussian kernel
+on its log-hour-1 distance from the case's hour-1 print p1 (launches of similar
+size decay more alike). The case's ln r(h) is predicted from p1, blended toward the
+plain empirical median by BLEND. Quantiles come from the empirical distribution of
+the regression residuals, shrunk by SPREAD (the residual spread of 38 launches is
+wider than the conditional spread of one).
 """
 
 import json
@@ -26,7 +29,9 @@ LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
 # Residual quantiles are shrunk to this spread: 38 launches over-disperse vs one launch.
 SPREAD = 0.45
 # The regression median is blended with the plain empirical median (robustness).
-BLEND = 0.3
+BLEND = 0.15
+# Gaussian kernel width (in log hour-1 viewers) for weighting similar-size launches.
+KERNEL = 2.0
 FLOOR = 0.01
 
 
@@ -58,6 +63,33 @@ def solve_ridge(X, Y, lam=1e-3):
             for b in range(k):
                 A[a][b] += xf[a] * xf[b]
             rhs[a] += xf[a] * yi
+    for a in range(k):
+        A[a][a] += lam
+    M = [A[i] + [rhs[i]] for i in range(k)]
+    for i in range(k):
+        piv = max(range(i, k), key=lambda r: abs(M[r][i]))
+        M[i], M[piv] = M[piv], M[i]
+        if abs(M[i][i]) < 1e-12:
+            continue
+        for r in range(k):
+            if r != i:
+                f = M[r][i] / M[i][i]
+                for c in range(i, k + 1):
+                    M[r][c] -= f * M[i][c]
+    return [M[i][k] / M[i][i] if abs(M[i][i]) > 1e-12 else 0.0 for i in range(k)]
+
+
+def solve_ridge_w(X, Y, W, lam=1e-3):
+    """Weighted least squares with intercept for X rows -> Y with per-row weights W."""
+    k = len(X[0]) + 1
+    A = [[0.0] * k for _ in range(k)]
+    rhs = [0.0] * k
+    for xi, yi, w in zip(X, Y, W):
+        xf = [1.0] + xi
+        for a in range(k):
+            for b in range(k):
+                A[a][b] += w * xf[a] * xf[b]
+            rhs[a] += w * xf[a] * yi
     for a in range(k):
         A[a][a] += lam
     M = [A[i] + [rhs[i]] for i in range(k)]
@@ -113,9 +145,11 @@ def forecast_case(case):
             med = 0.0
             resid = []
         else:
-            beta = solve_ridge(X, Y)
-            xc = [math.log(p1)]
-            med = (1.0 - BLEND) * (beta[0] + beta[1] * xc[0]) + BLEND * quantile(sorted(Y), 0.5)
+            lp1 = math.log(p1)
+            W = [math.exp(-((math.log(c["v1"]) - lp1) ** 2) / (2.0 * KERNEL * KERNEL))
+                 for c in comps if h in c["r"]]
+            beta = solve_ridge_w(X, Y, W)
+            med = (1.0 - BLEND) * (beta[0] + beta[1] * lp1) + BLEND * quantile(sorted(Y), 0.5)
             resid = sorted(yi - (beta[0] + beta[1] * xi[0]) for xi, yi in zip(X, Y))
         qs = [math.exp(med + quantile(resid, tau) * SPREAD) for tau in LEVELS]
         for i in range(1, 5):
