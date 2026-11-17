@@ -3,7 +3,7 @@
 Reads each case in /input, forecasts hours 2..24 of the release day as five quantiles
 (5/25/50/75/95) of the Twitch category's concurrent viewers, writes /output/<id>.out.
 
-Model (v4): for each comparable launch in the case, the release-day ratio
+Model (v5): for each comparable launch in the case, the release-day ratio
 r_i(h) = viewers(hour h) / viewers(hour 1). For every hour h we fit, across the
 comparable launches, a weighted linear regression of ln r_i(h) on ln v1_i (the
 launch's own hour-1 print), where each comparable is weighted by a Gaussian kernel
@@ -13,7 +13,9 @@ is wide (KERNEL), which shrinks the slope toward the pooled median — empirical
 most robust center on the 4 practice cases. Quantiles come from the empirical
 distribution of the regression residuals, shrunk by SPREAD, with the spread itself
 shrinking with hour (SPREAD_GROW < 0: late-hour ratios are less dispersed than the
-pooled residual spread suggests).
+pooled residual spread suggests) and asymmetric tail scaling (TAIL_LO for the lower
+two quantiles, TAIL_HI for the upper two: log residuals are left-skewed, so the
+lower tail needs less shrinkage than the upper).
 """
 
 import json
@@ -28,15 +30,18 @@ OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
 
 LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
 # Residual quantiles are shrunk to this spread: 38 launches over-disperse vs one launch.
-SPREAD = 0.65
+SPREAD = 0.70
 # Per-hour spread multiplier: sp(h) = SPREAD * (1 + SPREAD_GROW * (h-1)/23).
 SPREAD_GROW = -0.85
+# Asymmetric tail scaling: lower quantiles (tau<=0.25) by TAIL_LO, upper (tau>=0.75) by TAIL_HI.
+TAIL_LO = 0.85
+TAIL_HI = 1.15
 # The regression median is blended with the plain empirical median (robustness).
 BLEND = 0.0
 # Gaussian kernel width (in log hour-1 viewers) for weighting similar-size launches.
-KERNEL = 10.0
+KERNEL = 14.0
 # Ridge regularization strength (large => slope shrinks toward pooled median).
-# Tuned by walk-forward grid search over the 4 practice cases (grids 14-21).
+# Tuned by walk-forward grid search over the 4 practice cases (grids 8-24, ~900 configs).
 LAM = 0.5
 FLOOR = 0.01
 
@@ -130,7 +135,10 @@ def forecast_case(case):
             med = (1.0 - BLEND) * (beta[0] + beta[1] * lp1) + BLEND * quantile(sorted(Y), 0.5)
             resid = sorted(yi - (beta[0] + beta[1] * xi[0]) for xi, yi in zip(X, Y))
         sp = SPREAD * (1.0 + SPREAD_GROW * (h - 1) / 23.0)
-        qs = [math.exp(med + quantile(resid, tau) * sp) for tau in LEVELS]
+        qs = []
+        for tau in LEVELS:
+            t = TAIL_LO if tau <= 0.25 else (TAIL_HI if tau >= 0.75 else 1.0)
+            qs.append(math.exp(med + quantile(resid, tau) * sp * t))
         for i in range(1, 5):
             qs[i] = max(qs[i], qs[i - 1])
         rows.append({"hour": h, "q": [max(FLOOR, p1 * x) for x in qs]})
