@@ -3,15 +3,17 @@
 Reads each case in /input, forecasts hours 2..24 of the release day as five quantiles
 (5/25/50/75/95) of the Twitch category's concurrent viewers, writes /output/<id>.out.
 
-Model (v3): for each comparable launch in the case, the release-day ratio
+Model (v4): for each comparable launch in the case, the release-day ratio
 r_i(h) = viewers(hour h) / viewers(hour 1). For every hour h we fit, across the
 comparable launches, a weighted linear regression of ln r_i(h) on ln v1_i (the
 launch's own hour-1 print), where each comparable is weighted by a Gaussian kernel
 on its log-hour-1 distance from the case's hour-1 print p1 (launches of similar
-size decay more alike). The case's ln r(h) is predicted from p1, blended toward the
-plain empirical median by BLEND. Quantiles come from the empirical distribution of
-the regression residuals, shrunk by SPREAD (the residual spread of 38 launches is
-wider than the conditional spread of one).
+size decay more alike). The regression is strongly regularized (LAM) and the kernel
+is wide (KERNEL), which shrinks the slope toward the pooled median — empirically the
+most robust center on the 4 practice cases. Quantiles come from the empirical
+distribution of the regression residuals, shrunk by SPREAD, with the spread itself
+shrinking with hour (SPREAD_GROW < 0: late-hour ratios are less dispersed than the
+pooled residual spread suggests).
 """
 
 import json
@@ -26,11 +28,15 @@ OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
 
 LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
 # Residual quantiles are shrunk to this spread: 38 launches over-disperse vs one launch.
-SPREAD = 0.45
+SPREAD = 0.65
+# Per-hour spread multiplier: sp(h) = SPREAD * (1 + SPREAD_GROW * (h-1)/23).
+SPREAD_GROW = -0.85
 # The regression median is blended with the plain empirical median (robustness).
-BLEND = 0.15
+BLEND = 0.0
 # Gaussian kernel width (in log hour-1 viewers) for weighting similar-size launches.
-KERNEL = 2.0
+KERNEL = 10.0
+# Ridge regularization strength (large => slope shrinks toward pooled median).
+LAM = 0.5
 FLOOR = 0.01
 
 
@@ -50,7 +56,7 @@ def quantile(sorted_vals, tau):
     return sorted_vals[lo] * (1.0 - frac) + sorted_vals[hi] * frac
 
 
-def solve_ridge_w(X, Y, W, lam=1e-3):
+def solve_ridge_w(X, Y, W, lam=LAM):
     """Weighted least squares with intercept for X rows -> Y with per-row weights W."""
     k = len(X[0]) + 1
     A = [[0.0] * k for _ in range(k)]
@@ -122,7 +128,8 @@ def forecast_case(case):
             beta = solve_ridge_w(X, Y, W)
             med = (1.0 - BLEND) * (beta[0] + beta[1] * lp1) + BLEND * quantile(sorted(Y), 0.5)
             resid = sorted(yi - (beta[0] + beta[1] * xi[0]) for xi, yi in zip(X, Y))
-        qs = [math.exp(med + quantile(resid, tau) * SPREAD) for tau in LEVELS]
+        sp = SPREAD * (1.0 + SPREAD_GROW * (h - 1) / 23.0)
+        qs = [math.exp(med + quantile(resid, tau) * sp) for tau in LEVELS]
         for i in range(1, 5):
             qs[i] = max(qs[i], qs[i - 1])
         rows.append({"hour": h, "q": [max(FLOOR, p1 * x) for x in qs]})
