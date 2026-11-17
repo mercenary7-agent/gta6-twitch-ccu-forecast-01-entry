@@ -36,6 +36,7 @@ BLEND = 0.0
 # Gaussian kernel width (in log hour-1 viewers) for weighting similar-size launches.
 KERNEL = 10.0
 # Ridge regularization strength (large => slope shrinks toward pooled median).
+# Tuned by walk-forward grid search over the 4 practice cases (grids 14-21).
 LAM = 0.5
 FLOOR = 0.01
 
