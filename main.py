@@ -3,7 +3,7 @@
 Reads each case in /input, forecasts hours 2..24 of the release day as five quantiles
 (5/25/50/75/95) of the Twitch category's concurrent viewers, writes /output/<id>.out.
 
-Model: for each comparable launch in the case, the release-day ratio
+Model (v3): for each comparable launch in the case, the release-day ratio
 r_i(h) = viewers(hour h) / viewers(hour 1). For every hour h we fit, across the
 comparable launches, a weighted linear regression of ln r_i(h) on ln v1_i (the
 launch's own hour-1 print), where each comparable is weighted by a Gaussian kernel
@@ -18,9 +18,8 @@ import json
 import math
 import os
 import sys
+import datetime
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 INPUT_DIR = Path(os.environ.get("MAKEFUN_INPUT_DIR", "/input"))
 OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
@@ -37,7 +36,6 @@ FLOOR = 0.01
 
 def hour_key(day_start_iso, h):
     """The 'from' timestamp of release-day hour h (h=1 covers [day_start, day_start+1h))."""
-    import datetime
     ds = datetime.datetime.fromisoformat(day_start_iso.replace("Z", "+00:00"))
     return (ds + datetime.timedelta(hours=h - 1)).strftime("%Y-%m-%dT%H:00:00Z")
 
@@ -50,33 +48,6 @@ def quantile(sorted_vals, tau):
     hi = min(lo + 1, len(sorted_vals) - 1)
     frac = pos - lo
     return sorted_vals[lo] * (1.0 - frac) + sorted_vals[hi] * frac
-
-
-def solve_ridge(X, Y, lam=1e-3):
-    """Least squares with intercept for X rows of features -> Y; returns beta."""
-    k = len(X[0]) + 1
-    A = [[0.0] * k for _ in range(k)]
-    rhs = [0.0] * k
-    for xi, yi in zip(X, Y):
-        xf = [1.0] + xi
-        for a in range(k):
-            for b in range(k):
-                A[a][b] += xf[a] * xf[b]
-            rhs[a] += xf[a] * yi
-    for a in range(k):
-        A[a][a] += lam
-    M = [A[i] + [rhs[i]] for i in range(k)]
-    for i in range(k):
-        piv = max(range(i, k), key=lambda r: abs(M[r][i]))
-        M[i], M[piv] = M[piv], M[i]
-        if abs(M[i][i]) < 1e-12:
-            continue
-        for r in range(k):
-            if r != i:
-                f = M[r][i] / M[i][i]
-                for c in range(i, k + 1):
-                    M[r][c] -= f * M[i][c]
-    return [M[i][k] / M[i][i] if abs(M[i][i]) > 1e-12 else 0.0 for i in range(k)]
 
 
 def solve_ridge_w(X, Y, W, lam=1e-3):
@@ -135,19 +106,19 @@ def forecast_case(case):
     if first is None:
         raise ValueError("case has no hour-1 print")
     p1 = max(1, first.get("viewers"))
+    lp1 = math.log(p1)
     comps = comparable_ratios(case)
     rows = []
     for row in case["forecast"]:
         h = row["hour"]
-        X = [[math.log(c["v1"])] for c in comps if h in c["r"]]
-        Y = [math.log(max(1e-6, c["r"][h])) for c in comps if h in c["r"]]
+        used = [c for c in comps if h in c["r"]]
+        X = [[math.log(c["v1"])] for c in used]
+        Y = [math.log(max(1e-6, c["r"][h])) for c in used]
         if not X:
             med = 0.0
             resid = []
         else:
-            lp1 = math.log(p1)
-            W = [math.exp(-((math.log(c["v1"]) - lp1) ** 2) / (2.0 * KERNEL * KERNEL))
-                 for c in comps if h in c["r"]]
+            W = [math.exp(-((math.log(c["v1"]) - lp1) ** 2) / (2.0 * KERNEL * KERNEL)) for c in used]
             beta = solve_ridge_w(X, Y, W)
             med = (1.0 - BLEND) * (beta[0] + beta[1] * lp1) + BLEND * quantile(sorted(Y), 0.5)
             resid = sorted(yi - (beta[0] + beta[1] * xi[0]) for xi, yi in zip(X, Y))
